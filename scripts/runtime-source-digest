@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_dir"
+
+runtime_files=(
+    install.sh
+    uninstall.sh
+    patches/libei-1.2.1-close-keymap-fd.patch
+    scripts/build-compat.sh
+    scripts/build-libei.sh
+    scripts/build-winpr.sh
+    scripts/check-host.sh
+    scripts/clean-wine-device-registry
+    scripts/compare-pe-normalized.py
+    scripts/configure-unattended.sh
+    scripts/inspect-wine-device-registry.py
+    scripts/installer-download.sh
+    scripts/archive-wine-launchers.py
+    scripts/runtime-settings.sh
+    scripts/runtime-source-digest
+    scripts/stop-wine-prefix
+    scripts/release-grd-clipboard.py
+    scripts/uu-host-clipboard.py
+    scripts/uu_connection_status.py
+    scripts/uu-keyring-unlock.py
+    scripts/uu-agent
+    scripts/uu-ssh
+    scripts/uu-shell
+    scripts/uu-link
+    scripts/uu-remote
+    scripts/uu-remote-bridge
+    scripts/uu-shared-physical-vnc
+    scripts/uu-remote-console
+    scripts/upgrade-uu-remote.sh
+    scripts/verify.sh
+    src/uu_cursor_guard.c
+    src/uu_injector.c
+    src/uu_input_bridge.c
+    src/uu_input_broker.c
+    src/uu_wine_clipboard_bridge.c
+    src/uu_network_filter.c
+    src/uu_service_control.c
+    src/uu_terminal_bridge.c
+    src/uu_terminal_proxy.c
+    src/uu_x11_input.c
+    src/uu_x11_clipboard.c
+    src/winlogon.c
+    src/winpr_sspi_shim.c
+    src/x11_input_protocol.h
+    src/x11_clipboard_protocol.h
+    src/terminal_bridge_protocol.h
+    systemd/uu-keyring-unlock.service
+    systemd/uu-remote-bridge-unattended.conf
+    systemd/uu-remote-bridge.service
+    systemd/uu-shared-physical-vnc.service
+    systemd/uu-remote-console.service
+    desktop/uu-remote.desktop.in
+)
+release_manifests=(patches/uu-remote-*.json)
+
+sha256sum "${runtime_files[@]}" "${release_manifests[@]}" | \
+    sha256sum | awk '{print $1}'

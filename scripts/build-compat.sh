@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1}"
+
+repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+output_dir="${1:-$repo_dir/build/compat}"
+cc="${MINGW_CC:-x86_64-w64-mingw32-gcc}"
+strip="${MINGW_STRIP:-x86_64-w64-mingw32-strip}"
+winegcc="${WINEGCC:-/opt/wine-stable/bin/winegcc}"
+host_cc="${HOST_CC:-gcc}"
+host_strip="${HOST_STRIP:-strip}"
+common=(-std=c11 -O2 -Wall -Wextra -Werror)
+pe_link=(-Wl,--no-insert-timestamp)
+
+for command in "$cc" "$strip" "$winegcc" "$host_cc" "$host_strip"; do
+    if ! command -v "$command" >/dev/null 2>&1; then
+        printf 'missing build tool: %s\n' "$command" >&2
+        exit 1
+    fi
+done
+
+mkdir -p "$output_dir"
+
+"$cc" "${common[@]}" "${pe_link[@]}" -shared \
+    -o "$output_dir/uu-input-bridge.dll" \
+    "$repo_dir/src/uu_input_bridge.c" -luser32
+"$cc" "${common[@]}" "${pe_link[@]}" -shared \
+    -o "$output_dir/uu-cursor-guard.dll" \
+    "$repo_dir/src/uu_cursor_guard.c" -luser32 -lgdi32
+"$cc" "${common[@]}" "${pe_link[@]}" -municode -mwindows \
+    -o "$output_dir/uu-input-broker.exe" \
+    "$repo_dir/src/uu_input_broker.c" -luser32 -lws2_32
+"$cc" "${common[@]}" "${pe_link[@]}" -municode \
+    -o "$output_dir/uu-injector.exe" \
+    "$repo_dir/src/uu_injector.c"
+"$cc" "${common[@]}" "${pe_link[@]}" -municode \
+    -o "$output_dir/uu-service-control.exe" \
+    "$repo_dir/src/uu_service_control.c" -ladvapi32
+"$cc" "${common[@]}" "${pe_link[@]}" -municode \
+    -I "$repo_dir/src" \
+    -o "$output_dir/uu-wine-clipboard-bridge.exe" \
+    "$repo_dir/src/uu_wine_clipboard_bridge.c" -lws2_32
+"$cc" "${common[@]}" "${pe_link[@]}" -I "$repo_dir/src" \
+    -o "$output_dir/uu-terminal-proxy.exe" \
+    "$repo_dir/src/uu_terminal_proxy.c" -lws2_32
+"$cc" "${common[@]}" "${pe_link[@]}" -mwindows \
+    -o "$output_dir/uu-healthd-stub.exe" \
+    "$repo_dir/src/winlogon.c"
+"$cc" "${common[@]}" "${pe_link[@]}" -shared \
+    -o "$output_dir/winpr-sspi-shim.dll" \
+    "$repo_dir/src/winpr_sspi_shim.c"
+"$host_cc" "${common[@]}" -fPIC -shared \
+    -o "$output_dir/uu-network-filter.so" \
+    "$repo_dir/src/uu_network_filter.c" -ldl -pthread
+"$host_cc" "${common[@]}" -I "$repo_dir/src" \
+    -o "$output_dir/uu-x11-input" \
+    "$repo_dir/src/uu_x11_input.c" -ldl
+"$host_cc" "${common[@]}" -I "$repo_dir/src" \
+    -o "$output_dir/uu-x11-clipboard" \
+    "$repo_dir/src/uu_x11_clipboard.c" -ldl
+"$host_cc" "${common[@]}" -I "$repo_dir/src" \
+    -o "$output_dir/uu-terminal-bridge" \
+    "$repo_dir/src/uu_terminal_bridge.c" -lutil
+
+"$strip" \
+    "$output_dir/uu-cursor-guard.dll" \
+    "$output_dir/uu-input-bridge.dll" \
+    "$output_dir/uu-input-broker.exe" \
+    "$output_dir/uu-injector.exe" \
+    "$output_dir/uu-service-control.exe" \
+    "$output_dir/uu-wine-clipboard-bridge.exe" \
+    "$output_dir/uu-terminal-proxy.exe" \
+    "$output_dir/uu-healthd-stub.exe" \
+    "$output_dir/winpr-sspi-shim.dll"
+"$host_strip" \
+    "$output_dir/uu-network-filter.so" \
+    "$output_dir/uu-x11-input" \
+    "$output_dir/uu-x11-clipboard" \
+    "$output_dir/uu-terminal-bridge"
+
+rm -f "$output_dir/winlogon.exe" "$output_dir/winlogon.exe.so"
+"$winegcc" -O2 -mwindows -o "$output_dir/winlogon.exe" \
+    "$repo_dir/src/winlogon.c"
+"$host_strip" "$output_dir/winlogon.exe.so"
+
+printf 'compatibility tools built in %s\n' "$output_dir"

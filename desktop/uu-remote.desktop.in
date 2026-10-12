@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=UU Remote
+GenericName=Remote Desktop
+Comment=Open the UU Remote management window
+Exec=@EXEC@
+Icon=024B_GameViewer.0
+Terminal=false
+Categories=Network;RemoteAccess;
+StartupNotify=true
+StartupWMClass=TigerVNC Viewer
+Keywords=UU;Remote;Desktop;

@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+work_dir="${UURB_BUILD_DIR:-$repo_dir/build/winpr}"
+download_client_only=false
+if [[ "${1:-}" == --download-client-only ]]; then
+    download_client_only=true
+    shift
+fi
+output_dir="${1:-$repo_dir/build/freerdp}"
+downloads="$work_dir/downloads"
+runtime="$work_dir/runtime"
+source_dir="$work_dir/FreeRDP"
+build_dir="$work_dir/build"
+build_recipe="$output_dir/.build-recipe"
+build_checksums="$output_dir/.build-sha256"
+
+# Jenkins prunes old nightly artifacts. Keep the Windows client and the
+# separately-built WinPR runtime on the exact same reviewed source revision.
+# Do not follow lastSuccessfulBuild: a replacement needs separate acceptance.
+freerdp_commit='168925dac792142f6d0b66e7e2d568a3d439521c'
+sdl_url='https://ci.freerdp.com/job/freerdp-nightly-windows/arch=win64,label=vs2017/2064/artifact/install/bin/sdl-freerdp.exe'
+sdl_sha256='b384347b6d0dd1e0c9912d18f5993b4e30643470e2a627e112debb34e8710762'
+openssl_url='https://mirror.msys2.org/mingw/mingw64/mingw-w64-x86_64-openssl-3.6.3-1-any.pkg.tar.zst'
+openssl_sha256='82de7ff886112374ffae9e7b3c843c82342e198543fb024790416ef56434fe9f'
+cjson_url='https://mirror.msys2.org/mingw/mingw64/mingw-w64-x86_64-cjson-1.7.19-1-any.pkg.tar.zst'
+cjson_sha256='f20c3fa89ab072caba93baca374f40b8c9ce23d6383aa55552ff13f31c7879aa'
+uriparser_url='https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-uriparser-1.0.2-1-any.pkg.tar.zst'
+uriparser_sha256='c7c1db089f04aa3c616fb53cddfa250b4e4dbb864b7d4d5250ade83e8a1e8d19'
+
+require() {
+    command -v "$1" >/dev/null 2>&1 || {
+        printf 'missing build tool: %s\n' "$1" >&2
+        exit 1
+    }
+}
+
+download() {
+    local url="$1"
+    local expected="$2"
+    local destination="$3"
+    local attempt download_status
+
+    if [[ -f "$destination" ]] && \
+       printf '%s  %s\n' "$expected" "$destination" | sha256sum -c - \
+           >/dev/null 2>&1; then
+        return
+    fi
+    for attempt in 1 2; do
+        download_status=0
+        if command -v aria2c >/dev/null 2>&1; then
+            aria2c --allow-overwrite=true --auto-file-renaming=false \
+                --continue=true --max-connection-per-server=8 \
+                --min-split-size=1M --split=8 \
+                --dir="$(dirname -- "$destination")" \
+                --out="$(basename -- "$destination").part" "$url" || download_status=$?
+        else
+            curl --continue-at - --fail --location --retry 3 \
+                --output "$destination.part" "$url" || download_status=$?
+        fi
+        if ((download_status != 0)); then
+            rm -f -- "$destination.part" "$destination.part.aria2"
+            printf 'Dependency download unavailable: %s\n' "$url" >&2
+            return 1
+        fi
+        if printf '%s  %s\n' "$expected" "$destination.part" | \
+            sha256sum -c -; then
+            mv "$destination.part" "$destination"
+            rm -f "$destination.part.aria2"
+            return
+        fi
+        rm -f "$destination.part" "$destination.part.aria2"
+        printf 'download hash mismatch; retrying %s (%s/2)\n' \
+            "$url" "$attempt" >&2
+    done
+    printf 'download verification failed: %s\n' "$url" >&2
+    return 1
+}
+
+prepare_sdl_client() {
+    local supplied="${UURB_FREERDP_CLIENT:-}"
+    if [[ -n "$supplied" ]]; then
+        if ! [[ -f "$supplied" ]] || ! printf '%s  %s\n' "$sdl_sha256" "$supplied" | sha256sum -c - >/dev/null 2>&1; then
+            printf 'UURB_FREERDP_CLIENT must match the reviewed SHA256 %s.\n' "$sdl_sha256" >&2
+            return 1
+        fi
+        if [[ "$(realpath "$supplied")" != "$(realpath -m "$downloads/sdl-freerdp.exe")" ]]; then
+            install -m 0600 "$supplied" "$downloads/sdl-freerdp.exe"
+        fi
+    fi
+    if download "$sdl_url" "$sdl_sha256" "$downloads/sdl-freerdp.exe"; then
+        return 0
+    fi
+    printf '%s\n' \
+        'The reviewed FreeRDP nightly may have been pruned by Jenkins.' \
+        'For an X11/XRDP desktop, use ./install.sh --desktop-relay vnc to avoid the Windows FreeRDP dependency.' \
+        'For RDP, set UURB_FREERDP_CLIENT=/path/to/the-reviewed/sdl-freerdp.exe; its pinned hash is still required.' \
+        'Do not substitute lastSuccessfulBuild or a new nightly hash without review. See docs/fresh-install-recovery.md.' >&2
+    return 1
+}
+
+if [[ "$download_client_only" == true ]]; then
+    require curl
+    require sha256sum
+    mkdir -p "$downloads"
+    prepare_sdl_client
+    exit 0
+fi
+
+for command in cmake curl git ninja sha256sum tar \
+    x86_64-w64-mingw32-gcc-win32 x86_64-w64-mingw32-windres; do
+    require "$command"
+done
+
+mkdir -p "$downloads" "$output_dir"
+recipe_id="$freerdp_commit:$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')"
+if [[ -f "$build_recipe" && -f "$build_checksums" ]] && \
+   [[ "$(<"$build_recipe")" == "$recipe_id" ]] && \
+   (cd "$output_dir" && sha256sum -c .build-sha256 >/dev/null 2>&1); then
+    printf 'FreeRDP Windows relay runtime is already current in %s\n' \
+        "$output_dir"
+    exit 0
+fi
+
+prepare_sdl_client
+download "$openssl_url" "$openssl_sha256" "$downloads/openssl.pkg.tar.zst"
+download "$cjson_url" "$cjson_sha256" "$downloads/cjson.pkg.tar.zst"
+download "$uriparser_url" "$uriparser_sha256" \
+    "$downloads/uriparser.pkg.tar.zst"
+
+rm -rf "$runtime"
+mkdir -p "$runtime"
+for package in "$downloads"/*.pkg.tar.zst; do
+    tar --zstd -xf "$package" -C "$runtime"
+done
+
+if [[ ! -d "$source_dir/.git" ]]; then
+    rm -rf "$source_dir"
+    git clone --filter=blob:none --no-checkout \
+        https://github.com/FreeRDP/FreeRDP.git "$source_dir"
+fi
+git -C "$source_dir" fetch --depth 1 origin "$freerdp_commit"
+git -C "$source_dir" checkout --detach "$freerdp_commit"
+if [[ "$(git -C "$source_dir" rev-parse HEAD)" != "$freerdp_commit" ]]; then
+    printf 'FreeRDP source revision verification failed\n' >&2
+    exit 1
+fi
+
+rm -rf "$build_dir"
+cmake -S "$source_dir" -B "$build_dir" -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    '-DCMAKE_C_FLAGS=-D__STDC_NO_THREADS__=1' \
+    -DCMAKE_SYSTEM_NAME=Windows \
+    -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc-win32 \
+    -DCMAKE_RC_COMPILER=x86_64-w64-mingw32-windres \
+    "-DCMAKE_FIND_ROOT_PATH=/usr/x86_64-w64-mingw32;$runtime/mingw64" \
+    -DCMAKE_PREFIX_PATH="$runtime/mingw64" \
+    -DOPENSSL_ROOT_DIR="$runtime/mingw64" \
+    -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+    -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+    -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+    -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY \
+    -DUSE_UNWIND=OFF \
+    -DWITH_VERBOSE_WINPR_ASSERT=OFF \
+    -DWITH_INTERNAL_MD4=ON \
+    -DWITH_INTERNAL_MD5=ON \
+    -DWITH_INTERNAL_RC4=ON \
+    -DWITH_NATIVE_SSPI=OFF \
+    -DWITH_WINPR_TOOLS=OFF \
+    -DWITH_CLIENT=OFF \
+    -DWITH_SERVER=OFF \
+    -DWITH_CHANNELS=OFF \
+    -DWITH_PROXY=OFF \
+    -DWITH_SHADOW=OFF \
+    -DWITH_SAMPLE=ON \
+    -DWITH_MANPAGES=OFF \
+    -DWITH_FFMPEG=OFF \
+    -DWITH_SWSCALE=OFF \
+    -DWITH_CAIRO=OFF \
+    -DWITH_JPEG=OFF \
+    -DWITH_KRB5=OFF \
+    -DWITH_PKCS11=OFF \
+    -DWITH_SMARTCARD_EMULATE=OFF \
+    -DWITH_SMARTCARD_INSPECT=OFF \
+    -DWITH_FUSE=OFF \
+    -DWITH_OPUS=OFF \
+    -DWITH_SOXR=OFF \
+    -DWITH_YUV=OFF
+ninja -C "$build_dir" -j "$(nproc)" winpr
+
+install -m 0755 "$downloads/sdl-freerdp.exe" \
+    "$output_dir/sdl-freerdp.exe"
+install -m 0755 "$build_dir/winpr/libwinpr/libwinpr3.dll" \
+    "$output_dir/libwinpr3.dll"
+install -m 0755 "$runtime/mingw64/bin/libcrypto-3-x64.dll" \
+    "$output_dir/libcrypto-3-x64.dll"
+install -m 0755 "$runtime/mingw64/bin/libssl-3-x64.dll" \
+    "$output_dir/libssl-3-x64.dll"
+install -m 0755 "$runtime/mingw64/bin/libcjson-1.dll" \
+    "$output_dir/libcjson-1.dll"
+install -m 0755 "$runtime/mingw64/bin/liburiparser-1.dll" \
+    "$output_dir/liburiparser-1.dll"
+mkdir -p "$output_dir/ossl-modules"
+install -m 0755 "$runtime/mingw64/lib/ossl-modules/legacy.dll" \
+    "$output_dir/ossl-modules/legacy.dll"
+
+printf '%s\n' "$recipe_id" >"$build_recipe.tmp"
+(
+    cd "$output_dir"
+    sha256sum \
+        sdl-freerdp.exe \
+        libwinpr3.dll \
+        libcrypto-3-x64.dll \
+        libssl-3-x64.dll \
+        libcjson-1.dll \
+        liburiparser-1.dll \
+        ossl-modules/legacy.dll \
+        >.build-sha256.tmp
+    mv .build-sha256.tmp .build-sha256
+)
+mv "$build_recipe.tmp" "$build_recipe"
+
+printf 'FreeRDP Windows relay runtime built in %s\n' "$output_dir"

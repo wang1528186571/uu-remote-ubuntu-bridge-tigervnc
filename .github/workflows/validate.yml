@@ -1,0 +1,63 @@
+name: validate
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: validate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  source-and-docs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Check shell syntax
+        shell: bash
+        run: |
+          while IFS= read -r file; do
+            bash -n "$file" || exit
+          done < <(
+            find . -type f \( \
+              -name '*.sh' \
+              -o -path './scripts/uu-remote' \
+              -o -path './scripts/uu-remote-bridge' \
+            \) -not -path './build/*' -print
+          )
+
+      - name: Compile Python
+        run: python3 -m compileall -q scripts tests
+
+      - name: Install test compilers and isolated clipboard runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-mingw-w64-x86-64-win32 \
+            wine wine64 wine64-tools \
+            x11-utils xclip xvfb
+
+      - name: Run unit and documentation tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Exercise the one-way controller clipboard boundary
+        env:
+          UURB_WINE_BIN: /usr/bin/wine
+          UURB_WINEBOOT_BIN: /usr/bin/wineboot
+          UURB_WINESERVER_BIN: /usr/bin/wineserver
+          WINEGCC: /usr/bin/winegcc
+        run: ./scripts/test-controller-clipboard.sh
+
+      - name: Validate approved manifests
+        run: python3 scripts/patch-gameviewer.py manifests
